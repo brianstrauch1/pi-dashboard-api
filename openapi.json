@@ -1,0 +1,43 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "PI Dashboard API",
+    "version": "1.0.0",
+    "description": "Backend for PI Dashboard (Jira Data Center integration)."
+  },
+  "servers": [
+    { "url": "https://pi-dashboard-api.onrender.com", "description": "Render Prod" },
+    { "url": "http://localhost:3000", "description": "Local Dev" }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/api/v1/hello": {
+      "get": {
+        "summary": "Hello test",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
