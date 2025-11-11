@@ -21,7 +21,7 @@
     details summary { cursor: pointer; }
     details > div label { margin-right: 12px; }
     .hide { display: none !important; }
-    .centered-note { display:flex; align-items:center; justify-content:center; height:120px; color:#666; border:1px dashed #ddd; border-radius:12px; background:#fcfcfc; }
+    .centered-note { display:flex; align-items:center; justify-content:center; height:160px; color:#666; border:1px dashed #ddd; border-radius:12px; background:#fcfcfc; }
     .noteCell { width: 280px; min-height: 36px; resize: vertical; }
     .sort-indicator { font-size: 11px; color: #777; margin-left: 6px; }
     .filter-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:#0078d4; margin-left:6px; vertical-align:middle; }
@@ -34,10 +34,11 @@
     #filterMenu .section { margin-bottom: 10px; }
     #filterMenu .options { max-height: 200px; overflow: auto; border: 1px solid #eee; border-radius: 8px; padding: 6px; }
     #filterMenu .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:8px; }
-    #menuBackdrop { position: fixed; inset: 0; background: transparent; z-index: 999; }
+    #menuBackdrop {
+      position: fixed; inset: 0; background: transparent; z-index: 999;
+    }
     .checkbox-line { display:flex; align-items:center; gap:8px; padding:3px 2px; }
     .pill { display:inline-block; padding: 3px 8px; border:1px solid #ddd; border-radius: 999px; font-size: 12px; background:#fafafa; }
-    .blocked-row { background: #ffe3e3 !important; }
   </style>
 </head>
 <body>
@@ -46,11 +47,11 @@
   <!-- Controls -->
   <div class="card">
     <div class="controls">
-      <!-- Project (defaults to FLDOC if present) -->
+      <!-- Project -->
       <select id="projectSelect"><option value="">Select Project…</option></select>
 
-      <!-- Sprint: MULTI-SELECT (state-ordered) -->
-      <select id="sprintSelect" multiple size="5" disabled title="Hold Ctrl/Cmd to select multiple"><option value="">Select Sprint…</option></select>
+      <!-- Sprint: MULTI-SELECT -->
+      <select id="sprintSelect" multiple size="4" disabled title="Hold Ctrl/Cmd to select multiple"><option value="">Select Sprint…</option></select>
 
       <select id="issueLevel">
         <option value="subtask" selected>Sub-task Issue</option>
@@ -59,7 +60,7 @@
 
       <input id="search" placeholder="Search summary..." />
       <div style="display:flex; gap:8px;">
-        <button id="loadBtn">Show Results</button>
+        <button id="loadBtn">Load Sprint(s)</button>
         <button id="exportBtn" title="Export current table to CSV">Export CSV</button>
       </div>
 
@@ -68,15 +69,15 @@
     </div>
   </div>
 
-  <!-- Charts (shrunk ~50%) -->
+  <!-- Charts -->
   <div class="row">
     <div class="card">
       <div class="muted" style="margin-bottom:6px;">Parent Issues — Status Breakdown</div>
-      <canvas id="parentChart" height="80"></canvas>
+      <canvas id="parentChart" height="160"></canvas>
     </div>
     <div class="card">
       <div class="muted" id="subtaskChartTitle" style="margin-bottom:6px;">Sub-task Issues — Status Breakdown</div>
-      <canvas id="subtaskChart" height="80"></canvas>
+      <canvas id="subtaskChart" height="160"></canvas>
       <div id="subtaskNotRelevant" class="centered-note hide">Not Relevant for this Filter Mode</div>
     </div>
   </div>
@@ -96,7 +97,7 @@
   <!-- Table + Column chooser -->
   <div class="card">
     <div class="card" style="margin-top:12px;">
-      <details id="columnsDetails" open>
+      <details>
         <summary><strong>Columns</strong> (show/hide)</summary>
         <div id="columnToggles" class="controls" style="margin-top:10px;"></div>
       </details>
@@ -115,7 +116,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script>
     // --- Config ---
-    const API = 'https://pi-dashboard-api.onrender.com'; // <- production API
+    const API = 'https://pi-dashboard-api.onrender.com';
     const JIRA_BROWSE_BASE = 'https://jira.marquisware.com/browse';
     const spField = 'customfield_10002'; // Story Points (CF10002)
 
@@ -124,23 +125,17 @@
     let parentChart, subtaskChart;
     let projectsCache = [];
     let sprintsCache = [];
-    let taskComments = {}; // { issueKey: text }
-    let blockers = {};     // { issueKey: true }
+    let reviewNotes = {}; // { issueKey: text }
     let currentProject = '';
     let currentSprints = []; // multiple sprint names
     let sortState = { key: null, dir: null }; // dir: 'asc'|'desc'|null
 
-    // Column filter state (expanded)
+    // Column filter state
     const filterState = {
       status: new Set(),
       assignee: new Set(),
       component: new Set(),
-      sprint: new Set(),
-      type: new Set(),
-      priority: new Set(),
-      reporter: new Set(),
-      gls: new Set(),   // Go Live Status
-      pgls: new Set(),  // Parent Go Live Status
+      sprint: new Set(), // names
     };
 
     // --- Helpers ---
@@ -160,20 +155,23 @@
 
     // --- Columns ---
     const AVAILABLE_COLUMNS = [
-      { key:'blocker',  label:'Blocker Identified', value:i=>!!blockers[i.key], checkbox: true },
       { key:'key',       label:'Key',        value:i=>i.key, link:i=>`${JIRA_BROWSE_BASE}/${i.key}` },
       { key:'status',    label:'Status',     value:i=>i.fields.status?.name || '' },
       { key:'type',      label:'Type',       value:i=>i.fields.issuetype?.name || '' },
       { key:'summary',   label:'Summary',    value:i=>i.fields.summary || '' },
       { key:'sp',        label:'Story Points', value:i=>i.fields[spField] ?? '' },
       { key:'assignee',  label:'Assignee',   value:i=>i.fields.assignee?.displayName || '' },
+
       { key:'parent_summary', label:'Parent Summary', value:i=>i.fields['customfield_10705'] ?? '' },
       { key:'components',label:'Component',  value:i=>joinNames(i.fields.components) },
       { key:'gls',       label:'Go Live Status', value:i=>i.fields['customfield_16000'] ?? '' },
       { key:'pgls',      label:'Parent Go Live Status', value:i=>i.fields['customfield_16001'] ?? '' },
       { key:'parent_sp', label:'Parent Story Points', value:i=>i.fields['customfield_16002'] ?? '' },
+
       { key:'sprint',    label:'Sprint',     value:i=>sprintNames(i.fields['customfield_10020']) },
-      { key:'notes',     label:'Task Comments', value:i=>taskComments[i.key] ?? '', editable: true },
+
+      { key:'notes',     label:'Review Notes', value:i=>reviewNotes[i.key] ?? '', editable: true },
+
       { key:'due',       label:'Due Date',   value:i=>fmtDate(i.fields.duedate) },
       { key:'priority',  label:'Priority',   value:i=>i.fields.priority?.name || '' },
       { key:'reporter',  label:'Reporter',   value:i=>i.fields.reporter?.displayName || '' },
@@ -182,9 +180,9 @@
       { key:'remain',    label:'Remain (h)', value:i=>secsToH(i.fields.timeestimate) },
       { key:'spent',     label:'Spent (h)',  value:i=>secsToH(i.fields.timespent) },
     ];
-    const DEFAULT_PARENT = ['blocker','key','status','type','summary','sp','sprint'];
-    const DEFAULT_SUBTASK = ['blocker','key','status','parent_summary','components','assignee','parent_sp','pgls','sprint','notes'];
-    const COLS_KEYS = { parent:'piDashColsV11_parent', subtask:'piDashColsV11_subtask' };
+    const DEFAULT_PARENT = ['key','status','type','summary','sp','sprint'];
+    const DEFAULT_SUBTASK = ['key','status','parent_summary','components','assignee','parent_sp','pgls','sprint','notes'];
+    const COLS_KEYS = { parent:'piDashColsV10_parent', subtask:'piDashColsV10_subtask' };
     const colMap = Object.fromEntries(AVAILABLE_COLUMNS.map(c=>[c.key,c]));
 
     function loadColPrefs(mode){
@@ -200,7 +198,7 @@
       return base.map(k=>colMap[k]).filter(Boolean);
     }
 
-    // Column toggles UI (Columns section is default-open via details[open])
+    // Column toggles UI
     function renderColumnToggles(){
       const mode = getMode();
       const toggles = document.getElementById('columnToggles');
@@ -223,8 +221,6 @@
           renderKPIs();
         });
       });
-      // force-open
-      document.getElementById('columnsDetails').setAttribute('open', 'open');
     }
 
     // --- Projects & Sprints ---
@@ -237,13 +233,6 @@
         const projSel = document.getElementById('projectSelect');
         projSel.innerHTML = '<option value="">Select Project…</option>' +
           projectsCache.map(p=>`<option value="${escapeHtml(p.key)}">${escapeHtml(p.name)} (${escapeHtml(p.key)})</option>`).join('');
-
-        // Default to FLDOC if present
-        const def = projectsCache.find(p => p.key === 'FLDOC');
-        if (def) {
-          projSel.value = 'FLDOC';
-          loadSprintsForProject('FLDOC');
-        }
       } catch (e) {
         console.error('loadProjects failed', e);
         alert('Could not load projects. See console for details.');
@@ -267,7 +256,6 @@
           return;
         }
 
-        // Render in state order (already sorted by API): Active → Future → Closed → Unknown
         sprintSel.innerHTML = sprintsCache.map(s=>`<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)} — ${escapeHtml(s.state)}</option>`).join('');
         sprintSel.disabled = false;
       } catch (e) {
@@ -276,22 +264,22 @@
       }
     }
 
-    // --- Notes & Blockers I/O ---
-    async function loadNotes(projectKey, sprintName) {
-      taskComments = {};
-      blockers = {};
-      if (!projectKey || !sprintName) return;
+    // --- Notes I/O ---
+    async function loadNotes(projectKey, sprintsJoined) {
+      // Notes are per single sprint in our simple store; if multiple sprints are selected,
+      // we'll load the first sprint's notes. For daily use, teams usually focus on one sprint.
+      reviewNotes = {};
+      if (!projectKey || !sprintsJoined) return;
       try {
-        const res = await fetch(`${API}/api/notes?project=${encodeURIComponent(projectKey)}&sprint=${encodeURIComponent(sprintName)}`);
-        if (!res.ok) throw new Error(await res.text());
-        const data = await res.json();
-        taskComments = data.notes || {};
-        blockers = data.blockers || {};
-      } catch (e) {
-        console.warn('Could not load notes/blockers:', e);
-      }
+        const res = await fetch(`${API}/api/notes?project=${encodeURIComponent(projectKey)}&sprint=${encodeURIComponent(sprintsJoined)}`);
+        if (res.ok) {
+          const data = await res.json();
+          reviewNotes = data.notes || {};
+        }
+      } catch (e) { /* non-fatal */ }
     }
 
+    // Debounce helper
     function debounce(fn, wait=400) {
       let t;
       return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
@@ -303,17 +291,10 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ projectKey, sprintName, issueKey, text })
         });
-      } catch (e) { console.warn('Note save failed:', e); }
+      } catch (e) {
+        console.warn('Note save failed:', e);
+      }
     }, 500);
-    const saveBlockerDebounced = debounce(async (projectKey, sprintName, issueKey, blocked) => {
-      try {
-        await fetch(`${API}/api/blocker`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectKey, sprintName, issueKey, blocked })
-        });
-      } catch (e) { console.warn('Blocker save failed:', e); }
-    }, 250);
 
     // --- Load Issues (multi-sprint) ---
     function buildJQL(projectKey, sprintNames) {
@@ -338,7 +319,7 @@
         currentProject = projectKey;
         currentSprints = pickedSprints;
 
-        // Load notes/blockers for the first selected sprint (storage is per-sprint)
+        // Load notes for the first selected sprint (store is per single sprint name)
         await loadNotes(currentProject, currentSprints[0]);
 
         const jql = buildJQL(projectKey, pickedSprints);
@@ -347,17 +328,20 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ jql })
         });
+
         if (!res.ok) {
           const t = await res.text();
           console.error('API error body:', t);
           alert('API error: ' + t);
           return;
         }
+
         const data = await res.json();
         allIssues = data.issues || [];
 
-        // defaults: Sub-task mode; reset sort & filters
+        // defaults: Sub-task mode
         document.getElementById('issueLevel').value = 'subtask';
+        // reset sort & filters
         sortState = { key: null, dir: null };
         clearAllFilters();
 
@@ -375,7 +359,10 @@
 
     // --- Filtering + Sorting ---
     function clearAllFilters(){
-      Object.values(filterState).forEach(set => set.clear());
+      filterState.status.clear();
+      filterState.assignee.clear();
+      filterState.component.clear();
+      filterState.sprint.clear();
     }
 
     function filteredBase() {
@@ -404,26 +391,6 @@
           const sNames = sprintNames(i.fields['customfield_10020']).split(',').map(s=>s.trim()).filter(Boolean);
           if (!sNames.some(n => filterState.sprint.has(n))) return false;
         }
-        if (filterState.type.size) {
-          const v = i.fields.issuetype?.name || '';
-          if (!filterState.type.has(v)) return false;
-        }
-        if (filterState.priority.size) {
-          const v = i.fields.priority?.name || '';
-          if (!filterState.priority.has(v)) return false;
-        }
-        if (filterState.reporter.size) {
-          const v = i.fields.reporter?.displayName || '';
-          if (!filterState.reporter.has(v)) return false;
-        }
-        if (filterState.gls.size) {
-          const v = i.fields['customfield_16000'] || '';
-          if (!filterState.gls.has(v)) return false;
-        }
-        if (filterState.pgls.size) {
-          const v = i.fields['customfield_16001'] || '';
-          if (!filterState.pgls.has(v)) return false;
-        }
 
         if (q && !((i.fields.summary || '').toLowerCase().includes(q))) return false;
         return true;
@@ -433,8 +400,7 @@
     function cmp(a, b) { if (a === b) return 0; return a > b ? 1 : -1; }
     function isNumeric(v){ return typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !isNaN(+v)); }
     function getCellValueForSort(col, issue) {
-      if (col.key === 'notes') return taskComments[issue.key] ?? '';
-      if (col.key === 'blocker') return blockers[issue.key] ? 1 : 0;
+      if (col.key === 'notes') return reviewNotes[issue.key] ?? '';
       const val = col.value ? col.value(issue) : '';
       return val;
     }
@@ -442,20 +408,6 @@
     function filtered() {
       let arr = filteredBase();
       const cols = currentColumns();
-
-      // Default sub-task ordering by Component then Assignee (if no explicit sort chosen)
-      if (!sortState.key && getMode() === 'subtask') {
-        arr = [...arr].sort((a, b) => {
-          const ca = (a.fields.components?.[0]?.name || '').toLowerCase();
-          const cb = (b.fields.components?.[0]?.name || '').toLowerCase();
-          const aa = (a.fields.assignee?.displayName || '').toLowerCase();
-          const ab = (b.fields.assignee?.displayName || '').toLowerCase();
-          const c = cmp(ca, cb);
-          if (c !== 0) return c;
-          return cmp(aa, ab);
-        });
-        return arr;
-      }
 
       if (sortState.key && sortState.dir) {
         const col = cols.find(c => c.key === sortState.key) || colMap[sortState.key];
@@ -592,8 +544,7 @@
 
       for (const issue of rows) {
         const line = cols.map(c => {
-          if (c.key === 'notes') return csvEscape(taskComments[issue.key] ?? '');
-          if (c.key === 'blocker') return csvEscape(blockers[issue.key] ? 'Yes' : '');
+          if (c.key === 'notes') return csvEscape(reviewNotes[issue.key] ?? '');
           const val = c.value ? c.value(issue) : '';
           return csvEscape(val);
         });
@@ -616,13 +567,7 @@
           (c.key === 'status'    && filterState.status.size) ||
           (c.key === 'assignee'  && filterState.assignee.size) ||
           (c.key === 'components'&& filterState.component.size) ||
-          (c.key === 'sprint'    && filterState.sprint.size) ||
-          (c.key === 'type'      && filterState.type.size) ||
-          (c.key === 'priority'  && filterState.priority.size) ||
-          (c.key === 'reporter'  && filterState.reporter.size) ||
-          (c.key === 'gls'       && filterState.gls.size) ||
-          (c.key === 'pgls'      && filterState.pgls.size);
-
+          (c.key === 'sprint'    && filterState.sprint.size);
         let arrow = '';
         if (sortState.key === c.key) arrow = sortState.dir === 'asc' ? '▲' : (sortState.dir === 'desc' ? '▼' : '');
         return `<th data-colkey="${c.key}">
@@ -645,16 +590,11 @@
       const cols = currentColumns();
 
       const rows = filtered().map(i => {
-        const isBlocked = !!blockers[i.key];
         const tds = cols.map(c => {
-          if (c.checkbox) {
-            const checked = isBlocked ? 'checked' : '';
-            return `<td><input type="checkbox" class="blockerChk" data-issue="${i.key}" ${checked} /></td>`;
-          }
           if (c.editable) {
-            const val = taskComments[i.key] ?? '';
+            const val = reviewNotes[i.key] ?? '';
             return `<td>
-              <textarea class="noteCell" data-issue="${i.key}" placeholder="Add task comments...">${escapeHtml(String(val))}</textarea>
+              <textarea class="noteCell" data-issue="${i.key}" placeholder="Add review notes...">${escapeHtml(String(val))}</textarea>
             </td>`;
           }
           const val = (c.value ? c.value(i) : '');
@@ -664,7 +604,7 @@
           }
           return `<td>${escapeHtml(String(val))}</td>`;
         }).join('');
-        return `<tr class="${isBlocked ? 'blocked-row' : ''}">${tds}</tr>`;
+        return `<tr>${tds}</tr>`;
       }).join('');
 
       tbody.innerHTML = rows || `<tr><td colspan="${cols.length}">No issues found</td></tr>`;
@@ -674,25 +614,10 @@
         el.addEventListener('input', (e) => {
           const issueKey = e.target.getAttribute('data-issue');
           const text = e.target.value;
-          taskComments[issueKey] = text;
+          reviewNotes[issueKey] = text;
           if (currentProject && currentSprints.length && issueKey) {
             // Save against the first selected sprint
             saveNoteDebounced(currentProject, currentSprints[0], issueKey, text);
-          }
-        });
-      });
-
-      // Wire up blocker checkboxes
-      tbody.querySelectorAll('input.blockerChk').forEach(el => {
-        el.addEventListener('change', (e) => {
-          const issueKey = e.target.getAttribute('data-issue');
-          const checked = e.target.checked;
-          if (checked) blockers[issueKey] = true; else delete blockers[issueKey];
-          // Update row highlight
-          const row = e.target.closest('tr');
-          if (row) row.classList.toggle('blocked-row', !!checked);
-          if (currentProject && currentSprints.length && issueKey) {
-            saveBlockerDebounced(currentProject, currentSprints[0], issueKey, !!checked);
           }
         });
       });
@@ -701,6 +626,7 @@
     // --- Filter menu ---
     const menu = document.getElementById('filterMenu');
     const backdrop = document.getElementById('menuBackdrop');
+
     function closeMenu(){ menu.classList.add('hide'); backdrop.classList.add('hide'); }
     backdrop.addEventListener('click', closeMenu);
 
@@ -708,9 +634,15 @@
       const mode = getMode();
       const items = allIssues.filter(i => mode === 'parent' ? i.fields.issuetype?.subtask !== true : i.fields.issuetype?.subtask === true);
 
-      if (colKey === 'status')     return Array.from(new Set(items.map(i=>i.fields.status?.name).filter(Boolean))).sort();
-      if (colKey === 'assignee')   return Array.from(new Set(items.map(i=>i.fields.assignee?.displayName).filter(Boolean))).sort();
-      if (colKey === 'components') return Array.from(new Set(items.flatMap(i=>(i.fields.components||[]).map(c=>c.name)).filter(Boolean))).sort();
+      if (colKey === 'status') {
+        return Array.from(new Set(items.map(i=>i.fields.status?.name).filter(Boolean))).sort();
+      }
+      if (colKey === 'assignee') {
+        return Array.from(new Set(items.map(i=>i.fields.assignee?.displayName).filter(Boolean))).sort();
+      }
+      if (colKey === 'components') {
+        return Array.from(new Set(items.flatMap(i=>(i.fields.components||[]).map(c=>c.name)).filter(Boolean))).sort();
+      }
       if (colKey === 'sprint') {
         const set = new Set();
         for (const i of items) {
@@ -719,19 +651,14 @@
         }
         return Array.from(set).sort();
       }
-      if (colKey === 'type')       return Array.from(new Set(items.map(i=>i.fields.issuetype?.name).filter(Boolean))).sort();
-      if (colKey === 'priority')   return Array.from(new Set(items.map(i=>i.fields.priority?.name).filter(Boolean))).sort();
-      if (colKey === 'reporter')   return Array.from(new Set(items.map(i=>i.fields.reporter?.displayName).filter(Boolean))).sort();
-      if (colKey === 'gls')        return Array.from(new Set(items.map(i=>i.fields['customfield_16000']).filter(Boolean))).sort();
-      if (colKey === 'pgls')       return Array.from(new Set(items.map(i=>i.fields['customfield_16001']).filter(Boolean))).sort();
-
       return null; // no facet menu for other columns
     }
 
     function openFilterMenuForColumn(colKey, anchorEl) {
+      // Build menu content
       const facet = collectFacetOptions(colKey);
       const hasFacet = Array.isArray(facet);
-      const stateMap = { status: filterState.status, assignee: filterState.assignee, components: filterState.component, sprint: filterState.sprint, type: filterState.type, priority: filterState.priority, reporter: filterState.reporter, gls: filterState.gls, pgls: filterState.pgls };
+      const stateMap = { status: filterState.status, assignee: filterState.assignee, components: filterState.component, sprint: filterState.sprint };
       const activeSet = stateMap[colKey];
 
       let html = `<h4>${escapeHtml(colMap[colKey]?.label || 'Column')} — Options</h4>
@@ -770,15 +697,16 @@
         </div>`;
       }
 
-      // Place & show
       menu.innerHTML = html;
+
+      // Position near header cell
       const rect = anchorEl.getBoundingClientRect();
       menu.style.left = Math.max(12, rect.left + window.scrollX) + 'px';
       menu.style.top  = (rect.bottom + window.scrollY + 6) + 'px';
       menu.classList.remove('hide');
       backdrop.classList.remove('hide');
 
-      // Sort radios
+      // Wire sort radios
       menu.querySelectorAll('input[name="sortdir"]').forEach(r => {
         r.addEventListener('change', (e) => {
           const val = e.target.value;
@@ -787,7 +715,7 @@
         });
       });
 
-      // Facet actions
+      // Wire facet actions
       const facetBox = menu.querySelector('#facetBox');
       const applyBtn = menu.querySelector('#applyBtn');
       const clearBtn = menu.querySelector('#clearBtn');
@@ -800,15 +728,32 @@
         clearBtn?.addEventListener('click', () => {
           facetBox.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false);
           activeSet.clear();
-          renderHeader(); renderTableBody(); renderCharts(); renderKPIs(); renderActiveFilters(); closeMenu();
+          renderHeader();
+          renderTableBody();
+          renderCharts();
+          renderKPIs();
+          renderActiveFilters();
+          closeMenu();
         });
         applyBtn?.addEventListener('click', () => {
           const picks = Array.from(facetBox.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value);
-          activeSet.clear(); picks.forEach(v => activeSet.add(v));
-          renderHeader(); renderTableBody(); renderCharts(); renderKPIs(); renderActiveFilters(); closeMenu();
+          activeSet.clear();
+          picks.forEach(v => activeSet.add(v));
+          renderHeader();
+          renderTableBody();
+          renderCharts();
+          renderKPIs();
+          renderActiveFilters();
+          closeMenu();
         });
       } else {
-        applyBtn?.addEventListener('click', () => { renderHeader(); renderTableBody(); renderCharts(); renderKPIs(); closeMenu(); });
+        applyBtn?.addEventListener('click', () => {
+          renderHeader();
+          renderTableBody();
+          renderCharts();
+          renderKPIs();
+          closeMenu();
+        });
       }
     }
 
@@ -818,17 +763,17 @@
       if (filterState.assignee.size)  chips.push(`Assignee: ${Array.from(filterState.assignee).length} selected`);
       if (filterState.component.size) chips.push(`Component: ${Array.from(filterState.component).length} selected`);
       if (filterState.sprint.size)    chips.push(`Sprint: ${Array.from(filterState.sprint).length} selected`);
-      if (filterState.type.size)      chips.push(`Type: ${Array.from(filterState.type).length} selected`);
-      if (filterState.priority.size)  chips.push(`Priority: ${Array.from(filterState.priority).length} selected`);
-      if (filterState.reporter.size)  chips.push(`Reporter: ${Array.from(filterState.reporter).length} selected`);
-      if (filterState.gls.size)       chips.push(`Go Live: ${Array.from(filterState.gls).length} selected`);
-      if (filterState.pgls.size)      chips.push(`Parent Go Live: ${Array.from(filterState.pgls).length} selected`);
       document.getElementById('activeFilters').innerHTML = chips.map(c=>`<span class="pill">${escapeHtml(c)}</span>`).join(' ');
     }
 
     // --- Wire up ---
-    (async () => { await loadProjects(); console.log('Projects loaded'); })();
+    // Load projects on start
+    (async () => {
+      await loadProjects();
+      console.log('Projects loaded');
+    })();
 
+    // Project → Sprints
     document.getElementById('projectSelect').addEventListener('change', (e)=>{
       const key = e.target.value;
       const sprintSel = document.getElementById('sprintSelect');
@@ -837,16 +782,24 @@
       if (key) loadSprintsForProject(key);
     });
 
+    // Health + actions
     fetch(API + '/health').then(r=>r.json()).then(j=>console.log('Health:', j)).catch(console.error);
     document.getElementById('loadBtn').addEventListener('click', loadSprint);
     document.getElementById('exportBtn').addEventListener('click', exportCSV);
 
+    // Switch parent/subtask
     document.getElementById('issueLevel').addEventListener('change', () => {
-      renderHeader(); renderTableBody(); renderKPIs(); renderCharts();
+      renderHeader();
+      renderTableBody();
+      renderKPIs();
+      renderCharts();
     });
 
+    // Free-text search
     document.getElementById('search').addEventListener('input', () => {
-      renderTableBody(); renderKPIs(); renderCharts();
+      renderTableBody();
+      renderKPIs();
+      renderCharts();
     });
   </script>
 </body>
