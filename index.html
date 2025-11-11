@@ -1,0 +1,806 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agile PI Dashboard</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 24px; background: #fafafa; color: #222; }
+    h1 { margin-bottom: 20px; }
+    .row { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px; }
+    .card { background: #fff; border: 1px solid #eee; border-radius: 12px; padding: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.05); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+    th { background: #f9f9f9; position: sticky; top: 0; z-index: 1; user-select:none; cursor: pointer; }
+    .kpi { font-size: 28px; font-weight: 700; }
+    .muted { color: #666; }
+    .controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-bottom: 10px; align-items: center; }
+    select, input, button, textarea { padding: 8px; border-radius: 8px; border: 1px solid #ddd; }
+    button { background: #0078d4; color: white; border: none; cursor: pointer; }
+    button:hover { background: #005ea2; }
+    details summary { cursor: pointer; }
+    details > div label { margin-right: 12px; }
+    .hide { display: none !important; }
+    .centered-note { display:flex; align-items:center; justify-content:center; height:160px; color:#666; border:1px dashed #ddd; border-radius:12px; background:#fcfcfc; }
+    .noteCell { width: 280px; min-height: 36px; resize: vertical; }
+    .sort-indicator { font-size: 11px; color: #777; margin-left: 6px; }
+    .filter-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:#0078d4; margin-left:6px; vertical-align:middle; }
+    /* Filter menu */
+    #filterMenu {
+      position: absolute; background: #fff; border: 1px solid #ddd; border-radius: 10px; box-shadow: 0 10px 24px rgba(0,0,0,.15);
+      padding: 12px; width: 260px; z-index: 1000;
+    }
+    #filterMenu h4 { margin: 0 0 8px 0; font-size: 14px; }
+    #filterMenu .section { margin-bottom: 10px; }
+    #filterMenu .options { max-height: 200px; overflow: auto; border: 1px solid #eee; border-radius: 8px; padding: 6px; }
+    #filterMenu .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:8px; }
+    #menuBackdrop {
+      position: fixed; inset: 0; background: transparent; z-index: 999;
+    }
+    .checkbox-line { display:flex; align-items:center; gap:8px; padding:3px 2px; }
+    .pill { display:inline-block; padding: 3px 8px; border:1px solid #ddd; border-radius: 999px; font-size: 12px; background:#fafafa; }
+  </style>
+</head>
+<body>
+  <h1>Agile PI Dashboard</h1>
+
+  <!-- Controls -->
+  <div class="card">
+    <div class="controls">
+      <!-- Project -->
+      <select id="projectSelect"><option value="">Select Project…</option></select>
+
+      <!-- Sprint: MULTI-SELECT -->
+      <select id="sprintSelect" multiple size="4" disabled title="Hold Ctrl/Cmd to select multiple"><option value="">Select Sprint…</option></select>
+
+      <select id="issueLevel">
+        <option value="subtask" selected>Sub-task Issue</option>
+        <option value="parent">Parent Issue</option>
+      </select>
+
+      <input id="search" placeholder="Search summary..." />
+      <div style="display:flex; gap:8px;">
+        <button id="loadBtn">Load Sprint(s)</button>
+        <button id="exportBtn" title="Export current table to CSV">Export CSV</button>
+      </div>
+
+      <!-- Active filters quick view -->
+      <div id="activeFilters" class="muted"></div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="row">
+    <div class="card">
+      <div class="muted" style="margin-bottom:6px;">Parent Issues — Status Breakdown</div>
+      <canvas id="parentChart" height="160"></canvas>
+    </div>
+    <div class="card">
+      <div class="muted" id="subtaskChartTitle" style="margin-bottom:6px;">Sub-task Issues — Status Breakdown</div>
+      <canvas id="subtaskChart" height="160"></canvas>
+      <div id="subtaskNotRelevant" class="centered-note hide">Not Relevant for this Filter Mode</div>
+    </div>
+  </div>
+
+  <!-- KPIs -->
+  <div class="row">
+    <div class="card">
+      <div class="kpi" id="kpiTotalSP">0</div>
+      <div class="muted">Total Story Points (entire sprint set)</div>
+    </div>
+    <div class="card">
+      <div class="kpi" id="kpiDonePct">0%</div>
+      <div class="muted">% Complete (Resolved/Done/Closed ÷ Total Issues in View)</div>
+    </div>
+  </div>
+
+  <!-- Table + Column chooser -->
+  <div class="card">
+    <div class="card" style="margin-top:12px;">
+      <details>
+        <summary><strong>Columns</strong> (show/hide)</summary>
+        <div id="columnToggles" class="controls" style="margin-top:10px;"></div>
+      </details>
+    </div>
+
+    <table id="issuesTable">
+      <thead><tr id="issuesHeader"></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <!-- Floating filter menu -->
+  <div id="filterMenu" class="hide"></div>
+  <div id="menuBackdrop" class="hide"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script>
+    // --- Config ---
+    const API = 'https://pi-dashboard-api.onrender.com';
+    const JIRA_BROWSE_BASE = 'https://jira.marquisware.com/browse';
+    const spField = 'customfield_10002'; // Story Points (CF10002)
+
+    // --- State ---
+    let allIssues = [];
+    let parentChart, subtaskChart;
+    let projectsCache = [];
+    let sprintsCache = [];
+    let reviewNotes = {}; // { issueKey: text }
+    let currentProject = '';
+    let currentSprints = []; // multiple sprint names
+    let sortState = { key: null, dir: null }; // dir: 'asc'|'desc'|null
+
+    // Column filter state
+    const filterState = {
+      status: new Set(),
+      assignee: new Set(),
+      component: new Set(),
+      sprint: new Set(), // names
+    };
+
+    // --- Helpers ---
+    function joinNames(arr){ return (arr||[]).map(x => x?.name ?? x).join(', '); }
+    function fmtDate(s){ if(!s) return ''; const d=new Date(s); return d.toLocaleDateString(); }
+    function secsToH(x){ if(typeof x!=='number') return ''; return Math.round(x/3600); }
+    function escapeHtml(s){ return (s ?? '').toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+    function sprintNames(v){
+      if (!v) return '';
+      const a = Array.isArray(v) ? v : [v];
+      return a.map(s => (typeof s === 'string' ? (/name=([^,]*)/.exec(s)?.[1] || s) : (s?.name || ''))).filter(Boolean).join(', ');
+    }
+    function groupBy(arr, fn){ return arr.reduce((m,x)=>{ const k = fn(x); (m[k]=m[k]||[]).push(x); return m; },{}); }
+    const isResolvedName = name => /(done|closed|resolved)/i.test(name || '');
+    function getMode(){ return document.getElementById('issueLevel').value; } // 'parent'|'subtask'
+    function getMultiSelectValues(sel){ return Array.from(sel.selectedOptions).map(o=>o.value).filter(Boolean); }
+
+    // --- Columns ---
+    const AVAILABLE_COLUMNS = [
+      { key:'key',       label:'Key',        value:i=>i.key, link:i=>`${JIRA_BROWSE_BASE}/${i.key}` },
+      { key:'status',    label:'Status',     value:i=>i.fields.status?.name || '' },
+      { key:'type',      label:'Type',       value:i=>i.fields.issuetype?.name || '' },
+      { key:'summary',   label:'Summary',    value:i=>i.fields.summary || '' },
+      { key:'sp',        label:'Story Points', value:i=>i.fields[spField] ?? '' },
+      { key:'assignee',  label:'Assignee',   value:i=>i.fields.assignee?.displayName || '' },
+
+      { key:'parent_summary', label:'Parent Summary', value:i=>i.fields['customfield_10705'] ?? '' },
+      { key:'components',label:'Component',  value:i=>joinNames(i.fields.components) },
+      { key:'gls',       label:'Go Live Status', value:i=>i.fields['customfield_16000'] ?? '' },
+      { key:'pgls',      label:'Parent Go Live Status', value:i=>i.fields['customfield_16001'] ?? '' },
+      { key:'parent_sp', label:'Parent Story Points', value:i=>i.fields['customfield_16002'] ?? '' },
+
+      { key:'sprint',    label:'Sprint',     value:i=>sprintNames(i.fields['customfield_10020']) },
+
+      { key:'notes',     label:'Review Notes', value:i=>reviewNotes[i.key] ?? '', editable: true },
+
+      { key:'due',       label:'Due Date',   value:i=>fmtDate(i.fields.duedate) },
+      { key:'priority',  label:'Priority',   value:i=>i.fields.priority?.name || '' },
+      { key:'reporter',  label:'Reporter',   value:i=>i.fields.reporter?.displayName || '' },
+      { key:'updated',   label:'Updated',    value:i=>fmtDate(i.fields.updated) },
+      { key:'orig',      label:'Orig (h)',   value:i=>secsToH(i.fields.timeoriginalestimate) },
+      { key:'remain',    label:'Remain (h)', value:i=>secsToH(i.fields.timeestimate) },
+      { key:'spent',     label:'Spent (h)',  value:i=>secsToH(i.fields.timespent) },
+    ];
+    const DEFAULT_PARENT = ['key','status','type','summary','sp','sprint'];
+    const DEFAULT_SUBTASK = ['key','status','parent_summary','components','assignee','parent_sp','pgls','sprint','notes'];
+    const COLS_KEYS = { parent:'piDashColsV10_parent', subtask:'piDashColsV10_subtask' };
+    const colMap = Object.fromEntries(AVAILABLE_COLUMNS.map(c=>[c.key,c]));
+
+    function loadColPrefs(mode){
+      try { return JSON.parse(localStorage.getItem(COLS_KEYS[mode])) || null; } catch { return null; }
+    }
+    function saveColPrefs(mode, keys){
+      localStorage.setItem(COLS_KEYS[mode], JSON.stringify(keys));
+    }
+    function currentColumns(){
+      const mode = getMode();
+      const prefs = loadColPrefs(mode);
+      const base = (prefs && prefs.length) ? prefs : (mode === 'parent' ? DEFAULT_PARENT : DEFAULT_SUBTASK);
+      return base.map(k=>colMap[k]).filter(Boolean);
+    }
+
+    // Column toggles UI
+    function renderColumnToggles(){
+      const mode = getMode();
+      const toggles = document.getElementById('columnToggles');
+      const active = new Set(currentColumns().map(c=>c.key));
+      toggles.innerHTML = AVAILABLE_COLUMNS.map(c => `
+        <label style="display:inline-flex;align-items:center;gap:6px;">
+          <input type="checkbox" data-colkey="${c.key}" ${active.has(c.key)?'checked':''}>
+          ${c.label}
+        </label>
+      `).join('');
+      toggles.querySelectorAll('input[type=checkbox]').forEach(cb=>{
+        cb.addEventListener('change', ()=>{
+          const checkedKeys = Array.from(toggles.querySelectorAll('input[type=checkbox]:checked'))
+            .map(x=>x.getAttribute('data-colkey'));
+          const ordered = AVAILABLE_COLUMNS.map(c=>c.key).filter(k=>checkedKeys.includes(k));
+          saveColPrefs(mode, ordered);
+          renderHeader();
+          renderTableBody();
+          renderCharts();
+          renderKPIs();
+        });
+      });
+    }
+
+    // --- Projects & Sprints ---
+    async function loadProjects() {
+      try {
+        const res = await fetch(`${API}/api/projects`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        projectsCache = data.projects || [];
+        const projSel = document.getElementById('projectSelect');
+        projSel.innerHTML = '<option value="">Select Project…</option>' +
+          projectsCache.map(p=>`<option value="${escapeHtml(p.key)}">${escapeHtml(p.name)} (${escapeHtml(p.key)})</option>`).join('');
+      } catch (e) {
+        console.error('loadProjects failed', e);
+        alert('Could not load projects. See console for details.');
+      }
+    }
+
+    async function loadSprintsForProject(projectKeyOrId) {
+      try {
+        const sprintSel = document.getElementById('sprintSelect');
+        sprintSel.disabled = true;
+        sprintSel.innerHTML = '<option value="">Loading…</option>';
+
+        const res = await fetch(`${API}/api/sprints?projectKeyOrId=${encodeURIComponent(projectKeyOrId)}`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        sprintsCache = data.sprints || [];
+
+        if (!sprintsCache.length) {
+          sprintSel.innerHTML = '<option value="">No sprints found (project may use Kanban)</option>';
+          sprintSel.disabled = true;
+          return;
+        }
+
+        sprintSel.innerHTML = sprintsCache.map(s=>`<option value="${escapeHtml(s.name)}">${escapeHtml(s.name)} — ${escapeHtml(s.state)}</option>`).join('');
+        sprintSel.disabled = false;
+      } catch (e) {
+        console.error('loadSprintsForProject failed', e);
+        alert('Could not load sprints for that project. See console for details.');
+      }
+    }
+
+    // --- Notes I/O ---
+    async function loadNotes(projectKey, sprintsJoined) {
+      // Notes are per single sprint in our simple store; if multiple sprints are selected,
+      // we'll load the first sprint's notes. For daily use, teams usually focus on one sprint.
+      reviewNotes = {};
+      if (!projectKey || !sprintsJoined) return;
+      try {
+        const res = await fetch(`${API}/api/notes?project=${encodeURIComponent(projectKey)}&sprint=${encodeURIComponent(sprintsJoined)}`);
+        if (res.ok) {
+          const data = await res.json();
+          reviewNotes = data.notes || {};
+        }
+      } catch (e) { /* non-fatal */ }
+    }
+
+    // Debounce helper
+    function debounce(fn, wait=400) {
+      let t;
+      return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), wait); };
+    }
+    const saveNoteDebounced = debounce(async (projectKey, sprintName, issueKey, text) => {
+      try {
+        await fetch(`${API}/api/notes`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectKey, sprintName, issueKey, text })
+        });
+      } catch (e) {
+        console.warn('Note save failed:', e);
+      }
+    }, 500);
+
+    // --- Load Issues (multi-sprint) ---
+    function buildJQL(projectKey, sprintNames) {
+      const clauses = [];
+      if (projectKey) clauses.push(`project = ${projectKey}`);
+      if (sprintNames?.length) {
+        const escaped = sprintNames.map(n => `"${n.replace(/"/g, '\\"')}"`).join(',');
+        clauses.push(`sprint in (${escaped})`);
+      }
+      return clauses.join(' AND ');
+    }
+
+    async function loadSprint() {
+      try {
+        const projectKey = document.getElementById('projectSelect').value.trim();
+        const sprintSel = document.getElementById('sprintSelect');
+        const pickedSprints = getMultiSelectValues(sprintSel);
+
+        if (!projectKey) { alert('Select a project'); return; }
+        if (!pickedSprints.length) { alert('Select one or more sprints'); return; }
+
+        currentProject = projectKey;
+        currentSprints = pickedSprints;
+
+        // Load notes for the first selected sprint (store is per single sprint name)
+        await loadNotes(currentProject, currentSprints[0]);
+
+        const jql = buildJQL(projectKey, pickedSprints);
+        const res = await fetch(`${API}/api/search`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jql })
+        });
+
+        if (!res.ok) {
+          const t = await res.text();
+          console.error('API error body:', t);
+          alert('API error: ' + t);
+          return;
+        }
+
+        const data = await res.json();
+        allIssues = data.issues || [];
+
+        // defaults: Sub-task mode
+        document.getElementById('issueLevel').value = 'subtask';
+        // reset sort & filters
+        sortState = { key: null, dir: null };
+        clearAllFilters();
+
+        renderColumnToggles();
+        renderHeader();
+        renderTableBody();
+        renderKPIs();
+        renderCharts();
+        renderActiveFilters();
+      } catch (e) {
+        console.error('loadSprint failed:', e);
+        alert('Frontend error: ' + e);
+      }
+    }
+
+    // --- Filtering + Sorting ---
+    function clearAllFilters(){
+      filterState.status.clear();
+      filterState.assignee.clear();
+      filterState.component.clear();
+      filterState.sprint.clear();
+    }
+
+    function filteredBase() {
+      const level = getMode();
+      const q = document.getElementById('search').value.toLowerCase();
+
+      return allIssues.filter(i => {
+        const isSub = i.fields.issuetype?.subtask === true;
+        if (level === 'parent' && isSub) return false;
+        if (level === 'subtask' && !isSub) return false;
+
+        // Column filters:
+        if (filterState.status.size) {
+          const name = i.fields.status?.name || '';
+          if (!filterState.status.has(name)) return false;
+        }
+        if (filterState.assignee.size) {
+          const name = i.fields.assignee?.displayName || '';
+          if (!filterState.assignee.has(name)) return false;
+        }
+        if (filterState.component.size) {
+          const names = (i.fields.components || []).map(c=>c.name);
+          if (!names.some(n => filterState.component.has(n))) return false;
+        }
+        if (filterState.sprint.size) {
+          const sNames = sprintNames(i.fields['customfield_10020']).split(',').map(s=>s.trim()).filter(Boolean);
+          if (!sNames.some(n => filterState.sprint.has(n))) return false;
+        }
+
+        if (q && !((i.fields.summary || '').toLowerCase().includes(q))) return false;
+        return true;
+      });
+    }
+
+    function cmp(a, b) { if (a === b) return 0; return a > b ? 1 : -1; }
+    function isNumeric(v){ return typeof v === 'number' || (typeof v === 'string' && v.trim() !== '' && !isNaN(+v)); }
+    function getCellValueForSort(col, issue) {
+      if (col.key === 'notes') return reviewNotes[issue.key] ?? '';
+      const val = col.value ? col.value(issue) : '';
+      return val;
+    }
+
+    function filtered() {
+      let arr = filteredBase();
+      const cols = currentColumns();
+
+      if (sortState.key && sortState.dir) {
+        const col = cols.find(c => c.key === sortState.key) || colMap[sortState.key];
+        if (col) {
+          arr = [...arr].sort((ia, ib) => {
+            let va = getCellValueForSort(col, ia);
+            let vb = getCellValueForSort(col, ib);
+            const na = isNumeric(va) ? +va : null;
+            const nb = isNumeric(vb) ? +vb : null;
+            let order = 0;
+            if (na !== null && nb !== null) order = na - nb;
+            else {
+              va = (va ?? '').toString().toLowerCase();
+              vb = (vb ?? '').toString().toLowerCase();
+              order = cmp(va, vb);
+            }
+            return sortState.dir === 'asc' ? order : -order;
+          });
+        }
+      }
+      return arr;
+    }
+
+    // --- Charts & KPIs ---
+    function makeStatusBreakdown(items) {
+      const by = groupBy(items, i => i.fields.status?.name || 'Unspecified');
+      const labelsRaw = Object.keys(by);
+      const counts = labelsRaw.map(l => by[l].length);
+      const total = counts.reduce((a,b)=>a+b, 0) || 1;
+      const labels = labelsRaw.map((l,idx) => `${l} (${counts[idx]}, ${Math.round(counts[idx]*100/total)}%)`);
+      return { labels, counts, total };
+    }
+
+    function renderCharts() {
+      // Always parent on left
+      const parentItems = allIssues.filter(i => i.fields.issuetype?.subtask !== true);
+      const parentData = makeStatusBreakdown(parentItems);
+      parentChart && parentChart.destroy();
+      parentChart = new Chart(document.getElementById('parentChart'), {
+        type: 'doughnut',
+        data: { labels: parentData.labels, datasets:[{ data: parentData.counts }] },
+        options: {
+          plugins: {
+            legend: { position: 'right' },
+            tooltip: {
+              callbacks: {
+                label: ctx => {
+                  const value = ctx.parsed || 0;
+                  const sum = parentData.total || 1;
+                  const pct = Math.round(value*100/sum);
+                  return ` ${value} (${pct}%)`;
+                }
+              }
+            }
+          }
+        }
+      });
+
+      // Right chart: sub-task filtered view
+      const level = getMode();
+      const subtaskCanvas = document.getElementById('subtaskChart');
+      const notRel = document.getElementById('subtaskNotRelevant');
+
+      if (level === 'subtask') {
+        const subFiltered = filtered();
+        const subData = makeStatusBreakdown(subFiltered);
+
+        notRel.classList.add('hide');
+        subtaskCanvas.classList.remove('hide');
+
+        subtaskChart && subtaskChart.destroy();
+        subtaskChart = new Chart(subtaskCanvas, {
+          type: 'doughnut',
+          data: { labels: subData.labels, datasets:[{ data: subData.counts }] },
+          options: {
+            plugins: {
+              legend: { position: 'right' },
+              tooltip: {
+                callbacks: {
+                  label: ctx => {
+                    const value = ctx.parsed || 0;
+                    const sum = subData.total || 1;
+                    const pct = Math.round(value*100/sum);
+                    return ` ${value} (${pct}%)`;
+                  }
+                }
+              }
+            }
+          }
+        });
+      } else {
+        subtaskChart && subtaskChart.destroy();
+        subtaskCanvas.classList.add('hide');
+        notRel.classList.remove('hide');
+      }
+    }
+
+    function renderKPIs() {
+      const totalSPAll = allIssues.reduce((a,i)=>a + (+i.fields[spField] || 0), 0);
+      document.getElementById('kpiTotalSP').textContent = totalSPAll.toFixed(1).replace(/\.0$/,'');
+
+      const items = filtered();
+      const total = items.length;
+      const resolved = items.filter(i=>isResolvedName(i.fields.status?.name)).length;
+      const pct = total ? (resolved/total) : 0;
+      document.getElementById('kpiDonePct').textContent = (pct*100).toFixed(1).replace(/\.0$/,'') + '%';
+    }
+
+    // --- CSV Export ---
+    function csvEscape(val) {
+      if (val == null) return '';
+      let s = String(val).replace(/\r?\n/g, ' ').trim();
+      if (s.includes('"')) s = s.replace(/"/g, '""');
+      if (/[",]/.test(s)) s = `"${s}"`;
+      return s;
+    }
+    function download(filename, text) {
+      const blob = new Blob([text], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+    function exportCSV() {
+      const cols = currentColumns();
+      const rows = filtered();
+
+      const headers = cols.map(c => c.label);
+      const lines = [headers.map(csvEscape).join(',')];
+
+      for (const issue of rows) {
+        const line = cols.map(c => {
+          if (c.key === 'notes') return csvEscape(reviewNotes[issue.key] ?? '');
+          const val = c.value ? c.value(issue) : '';
+          return csvEscape(val);
+        });
+        lines.push(line.join(','));
+      }
+
+      const mode = getMode();
+      const now = new Date();
+      const stamp = `${now.getFullYear()}${String(now.getMonth()+1).padStart(2,'0')}${String(now.getDate()).padStart(2,'0')}_${String(now.getHours()).padStart(2,'0')}${String(now.getMinutes()).padStart(2,'0')}`;
+      const fname = `${currentProject || 'project'}_${(currentSprints||[]).join('-') || 'sprints'}_${mode}_${stamp}.csv`;
+      download(fname, lines.join('\n'));
+    }
+
+    // --- Table render (header with menu + body) ---
+    function renderHeader() {
+      const header = document.getElementById('issuesHeader');
+      const cols = currentColumns();
+      header.innerHTML = cols.map(c => {
+        const isActiveFilter =
+          (c.key === 'status'    && filterState.status.size) ||
+          (c.key === 'assignee'  && filterState.assignee.size) ||
+          (c.key === 'components'&& filterState.component.size) ||
+          (c.key === 'sprint'    && filterState.sprint.size);
+        let arrow = '';
+        if (sortState.key === c.key) arrow = sortState.dir === 'asc' ? '▲' : (sortState.dir === 'desc' ? '▼' : '');
+        return `<th data-colkey="${c.key}">
+          <span>${c.label}${arrow ? `<span class="sort-indicator">${arrow}</span>`:''}${isActiveFilter?'<span class="filter-dot"></span>':''}</span>
+        </th>`;
+      }).join('');
+
+      // header click → open filter/sort menu
+      header.querySelectorAll('th').forEach(th => {
+        th.addEventListener('click', (ev) => {
+          const key = th.getAttribute('data-colkey');
+          if (!key) return;
+          openFilterMenuForColumn(key, th);
+        });
+      });
+    }
+
+    function renderTableBody() {
+      const tbody = document.querySelector('#issuesTable tbody');
+      const cols = currentColumns();
+
+      const rows = filtered().map(i => {
+        const tds = cols.map(c => {
+          if (c.editable) {
+            const val = reviewNotes[i.key] ?? '';
+            return `<td>
+              <textarea class="noteCell" data-issue="${i.key}" placeholder="Add review notes...">${escapeHtml(String(val))}</textarea>
+            </td>`;
+          }
+          const val = (c.value ? c.value(i) : '');
+          if (c.link){
+            const href = typeof c.link === 'function' ? c.link(i) : c.link;
+            return `<td><a href="${href}" target="_blank" rel="noopener">${escapeHtml(String(val))}</a></td>`;
+          }
+          return `<td>${escapeHtml(String(val))}</td>`;
+        }).join('');
+        return `<tr>${tds}</tr>`;
+      }).join('');
+
+      tbody.innerHTML = rows || `<tr><td colspan="${cols.length}">No issues found</td></tr>`;
+
+      // Wire up note editors
+      tbody.querySelectorAll('textarea.noteCell').forEach(el => {
+        el.addEventListener('input', (e) => {
+          const issueKey = e.target.getAttribute('data-issue');
+          const text = e.target.value;
+          reviewNotes[issueKey] = text;
+          if (currentProject && currentSprints.length && issueKey) {
+            // Save against the first selected sprint
+            saveNoteDebounced(currentProject, currentSprints[0], issueKey, text);
+          }
+        });
+      });
+    }
+
+    // --- Filter menu ---
+    const menu = document.getElementById('filterMenu');
+    const backdrop = document.getElementById('menuBackdrop');
+
+    function closeMenu(){ menu.classList.add('hide'); backdrop.classList.add('hide'); }
+    backdrop.addEventListener('click', closeMenu);
+
+    function collectFacetOptions(colKey) {
+      const mode = getMode();
+      const items = allIssues.filter(i => mode === 'parent' ? i.fields.issuetype?.subtask !== true : i.fields.issuetype?.subtask === true);
+
+      if (colKey === 'status') {
+        return Array.from(new Set(items.map(i=>i.fields.status?.name).filter(Boolean))).sort();
+      }
+      if (colKey === 'assignee') {
+        return Array.from(new Set(items.map(i=>i.fields.assignee?.displayName).filter(Boolean))).sort();
+      }
+      if (colKey === 'components') {
+        return Array.from(new Set(items.flatMap(i=>(i.fields.components||[]).map(c=>c.name)).filter(Boolean))).sort();
+      }
+      if (colKey === 'sprint') {
+        const set = new Set();
+        for (const i of items) {
+          const names = sprintNames(i.fields['customfield_10020']).split(',').map(s=>s.trim()).filter(Boolean);
+          names.forEach(n=>set.add(n));
+        }
+        return Array.from(set).sort();
+      }
+      return null; // no facet menu for other columns
+    }
+
+    function openFilterMenuForColumn(colKey, anchorEl) {
+      // Build menu content
+      const facet = collectFacetOptions(colKey);
+      const hasFacet = Array.isArray(facet);
+      const stateMap = { status: filterState.status, assignee: filterState.assignee, components: filterState.component, sprint: filterState.sprint };
+      const activeSet = stateMap[colKey];
+
+      let html = `<h4>${escapeHtml(colMap[colKey]?.label || 'Column')} — Options</h4>
+      <div class="section">
+        <div><strong>Sort</strong></div>
+        <div class="options" style="padding:6px;">
+          <label class="checkbox-line"><input type="radio" name="sortdir" value="asc" ${sortState.key===colKey && sortState.dir==='asc'?'checked':''}> Ascending</label>
+          <label class="checkbox-line"><input type="radio" name="sortdir" value="desc" ${sortState.key===colKey && sortState.dir==='desc'?'checked':''}> Descending</label>
+          <label class="checkbox-line"><input type="radio" name="sortdir" value="none" ${(sortState.key!==colKey || !sortState.dir)?'checked':''}> None</label>
+        </div>
+      </div>`;
+
+      if (hasFacet) {
+        html += `
+        <div class="section">
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <strong>Filter (${facet.length})</strong>
+            <button id="selAllBtn" class="pill" type="button">All</button>
+          </div>
+          <div class="options" id="facetBox">
+            ${facet.map(v => `
+              <label class="checkbox-line">
+                <input type="checkbox" value="${escapeHtml(v)}" ${activeSet?.has(v)?'checked':''}>
+                <span>${escapeHtml(v)}</span>
+              </label>`).join('')}
+          </div>
+          <div class="actions">
+            <button id="clearBtn" type="button">Clear</button>
+            <button id="applyBtn" type="button">Apply</button>
+          </div>
+        </div>`;
+      } else {
+        html += `<div class="muted">No filter options for this column.</div>
+        <div class="actions" style="margin-top:8px;">
+          <button id="applyBtn" type="button">Close</button>
+        </div>`;
+      }
+
+      menu.innerHTML = html;
+
+      // Position near header cell
+      const rect = anchorEl.getBoundingClientRect();
+      menu.style.left = Math.max(12, rect.left + window.scrollX) + 'px';
+      menu.style.top  = (rect.bottom + window.scrollY + 6) + 'px';
+      menu.classList.remove('hide');
+      backdrop.classList.remove('hide');
+
+      // Wire sort radios
+      menu.querySelectorAll('input[name="sortdir"]').forEach(r => {
+        r.addEventListener('change', (e) => {
+          const val = e.target.value;
+          if (val === 'none') { if (sortState.key === colKey) sortState = { key: null, dir: null }; }
+          else sortState = { key: colKey, dir: val };
+        });
+      });
+
+      // Wire facet actions
+      const facetBox = menu.querySelector('#facetBox');
+      const applyBtn = menu.querySelector('#applyBtn');
+      const clearBtn = menu.querySelector('#clearBtn');
+      const selAllBtn = menu.querySelector('#selAllBtn');
+
+      if (facetBox && activeSet) {
+        selAllBtn?.addEventListener('click', () => {
+          facetBox.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
+        });
+        clearBtn?.addEventListener('click', () => {
+          facetBox.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false);
+          activeSet.clear();
+          renderHeader();
+          renderTableBody();
+          renderCharts();
+          renderKPIs();
+          renderActiveFilters();
+          closeMenu();
+        });
+        applyBtn?.addEventListener('click', () => {
+          const picks = Array.from(facetBox.querySelectorAll('input[type=checkbox]:checked')).map(cb => cb.value);
+          activeSet.clear();
+          picks.forEach(v => activeSet.add(v));
+          renderHeader();
+          renderTableBody();
+          renderCharts();
+          renderKPIs();
+          renderActiveFilters();
+          closeMenu();
+        });
+      } else {
+        applyBtn?.addEventListener('click', () => {
+          renderHeader();
+          renderTableBody();
+          renderCharts();
+          renderKPIs();
+          closeMenu();
+        });
+      }
+    }
+
+    function renderActiveFilters() {
+      const chips = [];
+      if (filterState.status.size)    chips.push(`Status: ${Array.from(filterState.status).length} selected`);
+      if (filterState.assignee.size)  chips.push(`Assignee: ${Array.from(filterState.assignee).length} selected`);
+      if (filterState.component.size) chips.push(`Component: ${Array.from(filterState.component).length} selected`);
+      if (filterState.sprint.size)    chips.push(`Sprint: ${Array.from(filterState.sprint).length} selected`);
+      document.getElementById('activeFilters').innerHTML = chips.map(c=>`<span class="pill">${escapeHtml(c)}</span>`).join(' ');
+    }
+
+    // --- Wire up ---
+    // Load projects on start
+    (async () => {
+      await loadProjects();
+      console.log('Projects loaded');
+    })();
+
+    // Project → Sprints
+    document.getElementById('projectSelect').addEventListener('change', (e)=>{
+      const key = e.target.value;
+      const sprintSel = document.getElementById('sprintSelect');
+      sprintSel.innerHTML = '';
+      sprintSel.disabled = true;
+      if (key) loadSprintsForProject(key);
+    });
+
+    // Health + actions
+    fetch(API + '/health').then(r=>r.json()).then(j=>console.log('Health:', j)).catch(console.error);
+    document.getElementById('loadBtn').addEventListener('click', loadSprint);
+    document.getElementById('exportBtn').addEventListener('click', exportCSV);
+
+    // Switch parent/subtask
+    document.getElementById('issueLevel').addEventListener('change', () => {
+      renderHeader();
+      renderTableBody();
+      renderKPIs();
+      renderCharts();
+    });
+
+    // Free-text search
+    document.getElementById('search').addEventListener('input', () => {
+      renderTableBody();
+      renderKPIs();
+      renderCharts();
+    });
+  </script>
+</body>
+</html>
